@@ -1,7 +1,12 @@
 import operator
-from datetime import timedelta
+import os
+from datetime import datetime, timedelta
 
+import clickhouse_connect
 import faust
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = faust.App(
     "sptrans-stream-processor",
@@ -16,6 +21,13 @@ veiculos_por_linha = app.Table(
     default=set,
 ).tumbling(60, expires=timedelta(minutes=2))
 
+ch_client = clickhouse_connect.get_client(
+    host="localhost",
+    port=8123,
+    username="default",
+    password=os.getenv("CLICKHOUSE_PASSWORD"),
+)
+
 @app.agent(posicoes_topic)
 async def processar_posicoes(eventos):
     async for evento in eventos:
@@ -23,9 +35,13 @@ async def processar_posicoes(eventos):
         prefixo = evento.get("prefixo_veiculo")
 
         veiculos_por_linha[linha].apply(operator.or_, {prefixo})
-
         veiculos_ativos = veiculos_por_linha[linha].current()
-        print(f"Linha {linha}: {len(veiculos_ativos)} veiculos ativos na janela atual")
+
+        ch_client.insert(
+            "veiculos_por_linha",
+            [[linha, len(veiculos_ativos), datetime.now()]],
+            column_names=["linha", "veiculos_ativos", "timestamp"],
+        )
 
 if __name__ == "__main__":
     app.main()
