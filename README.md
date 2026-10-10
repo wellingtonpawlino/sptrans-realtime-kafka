@@ -1,45 +1,97 @@
 # SPTrans Realtime Kafka
 
-Pipeline de dados em tempo real das posições dos ônibus de São Paulo,
-usando a API Olho Vivo (SPTrans) e Apache Kafka.
+Pipeline de dados em tempo real das posições dos ônibus de São Paulo, construído sobre a API Olho Vivo (SPTrans) e Apache Kafka.
 
-Projeto derivado de [sptrans-data-pipeline](https://github.com/wellingtonpawlino/sptrans-data-pipeline)
-(pipeline batch), evoluindo para uma arquitetura de streaming em tempo real.
+Projeto derivado de [sptrans-data-pipeline](https://github.com/wellingtonpawlino/sptrans-data-pipeline) (pipeline batch), evoluindo para uma arquitetura de streaming em tempo real.
 
-## Status
+---
 
-Fase 2 concluída — stream processor gravando no ClickHouse, dashboard no Grafana.
+## O problema e como este projeto resolve
+
+São Paulo opera mais de 1.300 linhas de ônibus com milhares de veículos circulando simultaneamente. A API Olho Vivo da SPTrans disponibiliza a posição GPS de cada veículo a cada 45 segundos — um volume de ~6.800 eventos por ciclo.
+
+**A dor:** processar esses dados em batch (executar queries uma vez por hora, por exemplo) significa que qualquer análise operacional chega tarde demais para ser útil. Saber que uma linha ficou sem ônibus por 20 minutos é irrelevante quando você descobre isso no dia seguinte.
+
+**A solução:** uma arquitetura de streaming que ingere, processa e visualiza os dados conforme eles chegam, permitindo:
+
+- Monitorar em tempo real quantos veículos estão ativos por linha
+- Detectar anomalias operacionais (linhas com queda brusca de veículos) assim que ocorrem
+- Criar uma base histórica de séries temporais para análises futuras
+
+Este projeto demonstra como transformar uma fonte de dados pública em um produto de dados observável e acionável — o mesmo raciocínio que sustenta pipelines de dados em empresas de mobilidade, logística e transporte.
+
+---
 
 ## Arquitetura
 
 ```
 SPTrans API (Olho Vivo)
-        │
+        │   ~6.800 eventos a cada 45s
         ▼
-   [Poller Python]          coleta posições a cada 45s
-        │
+   [Poller Python]
+        │   publica cada veículo como evento individual
         ▼
-  Apache Kafka              tópico: posicoes_onibus (6 partições)
-        │
+  Apache Kafka
+  tópico: posicoes_onibus (6 partições)
+        │   desacopla produção do consumo
         ▼
- [Stream Processor]         agrega veículos únicos por linha (janela 30s)
-        │
+ [Stream Processor]
+        │   agrega veículos únicos por linha em janela de 30s
         ▼
-   ClickHouse               tabela: veiculos_por_linha
-        │
+   ClickHouse
+   tabela: veiculos_por_linha
+        │   armazena séries temporais com alta performance de escrita
         ▼
-    Grafana                 dashboard em tempo real
+    Grafana
+    dashboard em tempo real
 ```
+
+---
+
+## Stack e decisões técnicas
+
+### Por que Kafka?
+
+O Kafka atua como buffer entre a coleta e o processamento, resolvendo três problemas de uma vez:
+
+1. **Desacoplamento:** o poller e o processor rodam de forma independente. Se o processor cair, o Kafka retém as mensagens e o processamento retoma de onde parou quando o processo sobe novamente.
+2. **Escalabilidade:** com 6 partições, múltiplos consumers podem processar em paralelo caso o volume cresça.
+3. **Replay:** é possível reprocessar dados históricos alterando o offset do consumer — útil para corrigir bugs no processamento sem precisar rebuscar a API.
+
+Neste projeto o Kafka roda em **modo KRaft** (sem Zookeeper), o que simplifica a infraestrutura de desenvolvimento e é o padrão a partir do Kafka 3.x.
+
+### Por que ClickHouse?
+
+O ClickHouse é um banco de dados colunar OLAP otimizado para:
+- **Alta velocidade de escrita em lote** — ideal para ingestão contínua de séries temporais
+- **Queries analíticas rápidas** — `SELECT linha, max(veiculos_ativos)` sobre milhões de linhas em milissegundos
+- **Compressão eficiente** — dados de séries temporais com padrões repetitivos comprimem muito bem
+
+A alternativa seria PostgreSQL, mas ele é otimizado para leitura/escrita transacional (OLTP), não para scans analíticos sobre grandes volumes — o padrão de acesso predominante aqui.
+
+### Por que kafka-python ao invés de Faust/Spark Streaming?
+
+**Faust** foi o processador original planejado, mas apresenta incompatibilidade com Python 3.12+ e problemas de serialização com tipos como `set` em suas tabelas de estado. Para um projeto de aprendizado e portfólio, adicionar complexidade sem benefício real seria contra-producente.
+
+**Spark Streaming** seria adequado para escala horizontal e processamento distribuído, mas adiciona overhead operacional significativo para um volume de ~6.800 eventos/ciclo.
+
+A escolha de **kafka-python com aggregação em memória** é a solução mais simples que resolve o problema corretamente: consome eventos, deduplica veículos por linha usando `set`, e faz batch insert no ClickHouse a cada 30 segundos. Simples, eficiente, e fácil de evoluir.
+
+> Engenharia de dados de qualidade é saber quando não adicionar complexidade.
+
+---
 
 ## Stack
 
-| Componente | Tecnologia |
-|------------|------------|
-| Message broker | Apache Kafka 4.3 (modo KRaft) |
-| Stream processing | kafka-python 3.0 |
-| Data warehouse | ClickHouse 24.8 |
-| Visualização | Grafana 11.2 |
-| API fonte | SPTrans Olho Vivo v2.1 |
+| Componente | Tecnologia | Versão |
+|------------|------------|--------|
+| Message broker | Apache Kafka (KRaft) | 4.3 |
+| Stream processing | kafka-python | 3.0.11 |
+| Data warehouse | ClickHouse | 24.8 |
+| Visualização | Grafana | 11.2 |
+| API fonte | SPTrans Olho Vivo | v2.1 |
+
+---
 
 ## Como rodar
 
@@ -51,7 +103,7 @@ SPTrans API (Olho Vivo)
 
 ### Setup
 
-1. Clone o repositório e instale as dependências:
+1. Instale as dependências:
 
 ```bash
 pip install -r requirements.txt
@@ -79,35 +131,43 @@ python setup_clickhouse.py
 
 ### Executar
 
-**Terminal 1 — Poller** (coleta da API e publica no Kafka):
+**Terminal 1 — Poller:**
 
 ```bash
 PYTHONPATH=. python poller/kafka_poller.py
 ```
 
-**Terminal 2 — Processor** (consome Kafka e grava no ClickHouse):
+**Terminal 2 — Processor:**
 
 ```bash
 PYTHONPATH=. python stream/processor.py
 ```
 
-**Grafana:** acesse http://localhost:3000 (admin / senha do .env)
+**Grafana:** http://localhost:3000 — datasource ClickHouse provisionado automaticamente.
 
-O datasource ClickHouse é provisionado automaticamente.
+---
 
 ## Estrutura
 
 ```
-├── api/                    integração com API SPTrans
-│   ├── autenticacao.py     autenticação via token
-│   └── buscar_posicao.py   busca posição dos veículos
+├── api/
+│   ├── autenticacao.py         autenticação via token SPTrans
+│   └── buscar_posicao.py       extração e parsing das posições
 ├── poller/
-│   └── kafka_poller.py     loop de coleta e publicação no Kafka
+│   └── kafka_poller.py         loop de coleta e publicação no Kafka
 ├── stream/
-│   └── processor.py        consumer Kafka com agregação e flush para ClickHouse
+│   └── processor.py            consumer com agregação e flush para ClickHouse
 ├── grafana/
-│   └── provisioning/       datasource ClickHouse provisionado automaticamente
-├── setup_clickhouse.py     cria tabela veiculos_por_linha
-├── docker-compose.yml      Kafka + ClickHouse + Grafana
+│   └── provisioning/           datasource provisionado automaticamente
+├── setup_clickhouse.py         DDL da tabela veiculos_por_linha
+├── docker-compose.yml          Kafka + ClickHouse + Grafana
 └── requirements.txt
 ```
+
+---
+
+## Contexto de aprendizado
+
+Este projeto faz parte de uma jornada de evolução de **analista de dados para engenheiro de dados**. Os conceitos aplicados aqui — streaming, message brokers, bancos colunares, observabilidade — são os mesmos que sustentam pipelines de produção em empresas como iFood, Nubank e Uber no Brasil.
+
+Cada decisão técnica foi tomada com intenção: entender o tradeoff entre simplicidade e escalabilidade, entre ferramentas conhecidas e novas, entre o que funciona agora e o que suporta crescimento futuro.
