@@ -41,9 +41,18 @@ SPTrans API (Olho Vivo)
    ClickHouse
    tabela: veiculos_por_linha
         │   armazena séries temporais com alta performance de escrita
-        ▼
-    Grafana
-    dashboard em tempo real
+        ├──────────────────────────────────┐
+        ▼                                  │ consulta últimas 5 janelas
+    Grafana                       [Anomaly Detector]
+    dashboard em tempo real                │   calcula média móvel por linha
+                                           │   detecta quedas > 50%
+                                           ▼
+                                      ClickHouse
+                                      tabela: anomalias
+                                           │
+                                           ▼
+                                       Grafana
+                                       alertas sobrepostos ao dashboard
 ```
 
 ---
@@ -143,6 +152,14 @@ PYTHONPATH=. python poller/kafka_poller.py
 PYTHONPATH=. python stream/processor.py
 ```
 
+**Terminal 3 — Anomaly Detector:**
+
+```bash
+PYTHONPATH=. python stream/anomaly_detector.py
+```
+
+A cada 30 segundos o detector consulta as últimas 5 janelas de `veiculos_por_linha`, calcula a média móvel por linha e grava em `anomalias` quando detectar queda superior a 50%.
+
 **Grafana:** http://localhost:3000 — datasource ClickHouse provisionado automaticamente.
 
 ---
@@ -156,10 +173,11 @@ PYTHONPATH=. python stream/processor.py
 ├── poller/
 │   └── kafka_poller.py         loop de coleta e publicação no Kafka
 ├── stream/
-│   └── processor.py            consumer com agregação e flush para ClickHouse
+│   ├── processor.py            consumer com agregação e flush para ClickHouse
+│   └── anomaly_detector.py     detecta quedas bruscas de veículos por linha
 ├── grafana/
 │   └── provisioning/           datasource provisionado automaticamente
-├── setup_clickhouse.py         DDL da tabela veiculos_por_linha
+├── setup_clickhouse.py         DDL das tabelas veiculos_por_linha e anomalias
 ├── docker-compose.yml          Kafka + ClickHouse + Grafana
 └── requirements.txt
 ```
