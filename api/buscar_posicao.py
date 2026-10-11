@@ -10,7 +10,9 @@ def buscar_posicao_veiculos(session):
             for v in linha.get("vs", []):
                 veiculos.append({
                     "codigo_linha": linha.get("c"),
-                    "prefixo_veiculo": v.get("p"),
+                    "nome_linha": linha.get("lt0"),
+                    "destino": linha.get("lt1"),
+            ##        "prefixo_veiculo": v.get("p"),
                     "sentido": linha.get("sl"),  # Sentido da linha
                     "latitude": v.get("py"),
                     "longitude": v.get("px"),
