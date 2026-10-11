@@ -22,3 +22,16 @@ client.command("""
 """)
 
 print("Tabela 'veiculos_por_linha' criada (ou já existia).")
+
+client.command("""
+    CREATE TABLE IF NOT EXISTS anomalias (
+        linha               Int32,
+        timestamp           DateTime,
+        veiculos_ativos     Int32,
+        media_movel         Float64,
+        variacao_percentual Float64
+    ) ENGINE = MergeTree()
+    ORDER BY (linha, timestamp)
+""")
+
+print("Tabela 'anomalias' criada (ou já existia).")
